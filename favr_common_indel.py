@@ -2,6 +2,13 @@
 Common utilities for FAVR programs. Indel version.
 
 Authors: Bernie Pope, Danny Park, Fabrice Odefrey, Tu Nguyen-Dumont.
+
+# We store all reference coordinates in zero-based indices, which
+# is the way they are stored in BAM files, but not usually the way they
+# are used in Variant Call formats, such as annovar and VCF, which are
+# one-based.
+# However, we always display coordinates in one-based format, to be
+# consistent with external tools.
 '''
 
 import os
@@ -20,12 +27,15 @@ def sortByCoord(evidence):
 
 # compare two chromosome coordinates for ordering.
 def compareCoord(coord1, coord2):
-    chr1,pos1 = coord1[0].split(':')
-    chr2,pos2 = coord2[0].split(':')
+    #chr1,pos1 = coord1[0].split(':')
+    #chr2,pos2 = coord2[0].split(':')
+    chr1,pos1 = coord1[0]
+    chr2,pos2 = coord2[0]
     if chr1 == chr2:
-        return cmp(int(pos1), int(pos2))
+        #return cmp(int(pos1), int(pos2))
+        return cmp(pos1, pos2)
     else:
-        return compareChrCode(chr1[3:], chr2[3:])
+        return compareChrCode(chr1, chr2)
 
 def compareChrCode(code1, code2):
     isNumerical1 = code1.isdigit()
@@ -38,30 +48,27 @@ def compareChrCode(code1, code2):
     else:
         return cmp(code1, code2)
 
-def getEvidence(variantList, bamFilenames):
-    evidence, variants = initEvidence(variantList)
+def getEvidence(evidence, variants, bamFilenames):
+    #evidence, variants = initEvidence(variantList)
     # Iterate over sample BAM files.
     for bamFile in bamFilenames:
        with pysam.Samfile(bamFile, "rb") as bam:
            # Count how many samples have each particular variant.
            countVariants(evidence, variants, bam)
-    return evidence, variants
+    #return evidence 
 
 class EvidenceInfo(object):
     def __init__(self, inputRow, counts):
-        self.inputRow = inputRow
-        self.counts = counts
+        # original row from the input file
+        self.inputRow = inputRow 
+        # list of pairs: (reads same as variant, coverage)
+        self.counts = counts 
 
-def initEvidence(variantList):
-    '''Parse the variant list, and initialised the evidence dictionary'''
+def initEvidence(variants):
     evidence = {}
-    outputVariants = []
-    for variant in variantList:
-        info = parseVariantRow(variant)
-        if info:
-            evidence[info.id] = EvidenceInfo(inputRow = info.inputRow, counts = [])
-            outputVariants.append(info)
-    return evidence, outputVariants
+    for variant in variants:
+        evidence[variant.id] = EvidenceInfo(inputRow = variant.inputRow, counts = [])
+    return evidence
 
 def showEvidence(evidence):
     '''Print out the frequency counter for each variant.'''
@@ -71,7 +78,7 @@ def showEvidence(evidence):
 def countVariants(evidence, variants, bam):
     '''For each variant in the list, check if it is evident in this particular sample BAM.'''
     for variant in variants:
-        reads = lookupPileup(bam, variant.chromosome, variant.startPosition, variant.endPosition)
+        reads = lookupReads(bam, variant.chromosome, variant.startPosition, variant.endPosition)
         sameAsVariant = 0
         coverage = len(reads)
         for read in reads:
@@ -81,10 +88,10 @@ def countVariants(evidence, variants, bam):
 
 class Variant(object):
     def __init__(self, id, chromosome, startPosition, endPosition, inputRow):
-        self.id = id
+        self.id = id # (chr,startpos)
         self.chromosome = chromosome
-        self.startPosition = startPosition
-        self.endPosition = endPosition
+        self.startPosition = startPosition # zero based
+        self.endPosition = endPosition     # zero based
         self.inputRow = inputRow
 
 class SNV(Variant):
@@ -93,43 +100,47 @@ class SNV(Variant):
         self.refBase = refBase
         self.variantBase = variantBase
 
+    # Pretty print, showing start position in one-based form
     def __str__(self):
         return "SNV({},{},{},{})".format(self.chromosome,
-                self.startPosition, self.refBase, self.variantBase)
+                self.startPosition + 1, self.refBase, self.variantBase)
 
     # XXX untested
-    # XXX fix bug with cigars past the position
     def inAlignment(self, alignment):
-        offset = (self.startPosition - 1) - alignment.pos
-        if offset < 0:
-            return False
-        cigar_coords = cigarToCoords(alignment)
-        for cigar in cigar_coords:
-            if cigar.code == 'I':
+        target = self.startPosition - alignment.pos
+        offset = 0
+        for cigar in cigarToCoords(alignment):
+            if target < 0:
+                return False
+            # An SNV can only appear inside a Matched sequence
+            elif cigar.code == 'M':
+                if 0 <= target < cigar.length:
+                    return self.variantBase == alignment.query[offset + target]
+                else:
+                    offset += cigar.length
+                    target -= cigar.length
+            elif cigar.code == 'I':
                 offset += cigar.length
             elif cigar.code == 'D':
-                offset -= cigar.length
-        if offset > 0 and offset < alignment.qlen:
-            return alignment[offset] == self.variantBase
-        else:
-            return False
+                target -= cigar.length
+        return False
+
 
 class Deletion(Variant):
     def __init__(self, id, chromosome, startPosition, endPosition, inputRow):
         super(Deletion, self).__init__(id, chromosome, startPosition, endPosition, inputRow)
 
+    # Pretty print, showing start and end position in one-based form
     def __str__(self):
         return "Deletion({},{},{})".format(self.chromosome,
-                self.startPosition, self.endPosition)
+                self.startPosition + 1, self.endPosition + 1)
 
     def inAlignment(self, alignment):
         cigar_coords = cigarToCoords(alignment)
-        zeroStart = self.startPosition - 1
-        zeroEnd = self.endPosition - 1
         for cigar in cigar_coords:
             if (cigar.code == 'D' and
-                cigar.start == zeroStart and
-                cigar.start + cigar.length - 1 == zeroEnd):
+                cigar.start == self.startPosition and
+                cigar.start + cigar.length - 1 == self.endPosition):
                 return True
         return False
 
@@ -138,22 +149,23 @@ class Insertion(Variant):
         super(Insertion, self).__init__(id, chromosome, startPosition, startPosition, inputRow)
         self.insertedBases = insertedBases 
 
+    # Pretty print, showing start and end position in one-based form
     def __str__(self):
         return "Insertion({},{},{},{})".format(self.chromosome,
-                self.startPosition, self.endPosition, self.insertedBases)
+                self.startPosition + 1, self.endPosition + 1, self.insertedBases)
 
     def inAlignment(self, alignment):
         cigar_coords = cigarToCoords(alignment)
-        zeroStart = self.startPosition - 1
-        zeroEnd = self.endPosition - 1
         for cigar in cigar_coords:
             # XXX should check that the inserted bases are the same
-            if cigar.code == 'I' and cigar.start == zeroStart:
+            if cigar.code == 'I' and cigar.start == self.startPosition:
                 return True
         return False
 
 class CigarCoord(object):
     def __init__(self, code, start, length):
+        # 'M' = match, 'I' = insert, 'D' = delete, 'S' = soft clipped
+        # 'H' = hard clipped, 'P' = padded, 'N' = non-match, 'X' = ???
         self.code = code
         self.start = start # zero based
         self.length = length
@@ -203,47 +215,82 @@ def cigarToCoords(alignment):
             pass
     return result
 
+def parseVariantRowVCF(row):
+    '''Extract the interesting information about a variant from VCF input file.'''
+    if len(row) >= 5 and row[0].startswith('chr'):
+        # starPos and endPos are input in one-based coordinates, but
+        # we store them in zero-based coordinates
+        chr, startPos, id, ref, var = row[:5]
+        startPosZero = int(startPos) - 1
+        #varId = "%s:%s" % (chr,str(startPosZero))
+        varId = (chr, startPosZero)
+        # XXX need to handle indels
+        #if var == '-':
+        #    return Deletion(id = varId, 
+        #                    chromosome = chr,
+        #                    startPosition = startPosZero,      
+        #                    endPosition = endPosZero,
+        #                    inputRow = row)
+        #elif ref == '-':
+        #    return Insertion(id = varId, 
+        #                     chromosome = chr,
+        #                     startPosition = startPosZero, 
+        #                     inputRow = row,
+        #                     insertedBases = var)
+        #else:
+            # Variant and reference are present, assume an SNV
+        return SNV(id = varId, 
+                   chromosome = chr,
+                   startPosition = startPosZero,
+                   inputRow = row,
+                   refBase = ref, 
+                   variantBase = var)
+    return None
 
-def parseVariantRow(row):
-    '''Extract the interesting information about a variant from a SIFT TSV row.'''
+def parseVariantRowAnnovar(row):
+    '''Extract the interesting information about a variant from annovar input file.'''
     if len(row) >= 25 and row[0] != 'Func':
+        # starPos and endPos are input in one-based coordinates, but
+        # we store them in zero-based coordinates
         chr, startPos, endPos, ref, var = row[21:26]
+        startPosZero = int(startPos) - 1
+        endPosZero = int(endPos) - 1
+        #varId = "%s:%s" % (chr,str(startPosZero))
+        varId = (chr, startPosZero)
         if var == '-':
-            # The variant is missing so it is a deletion.
-            return Deletion(id = "%s:%s" % (chr,startPos), 
+            # The variant is missing; it is a deletion.
+            return Deletion(id = varId, 
                             chromosome = chr,
-                            startPosition = int(startPos),      
-                            endPosition = int(endPos),
+                            startPosition = startPosZero,      
+                            endPosition = endPosZero,
                             inputRow = row)
         elif ref == '-':
-            # The reference is missing to it is an insertion.
-            return Insertion(id = "%s:%s" % (chr,startPos), 
+            # The reference is missing; it is an insertion.
+            return Insertion(id = varId, 
                              chromosome = chr,
-                             startPosition = int(startPos),      
+                             startPosition = startPosZero, 
                              inputRow = row,
                              insertedBases = var)
         else:
             # Variant and reference are present, assume an SNV
-            return SNV(id = "%s:%s" % (chr,startPos), 
+            return SNV(id = varId, 
                        chromosome = chr,
-                       startPosition = int(startPos),
+                       startPosition = startPosZero,
                        inputRow = row,
                        refBase = ref, 
                        variantBase = var)
-
     return None
 
-# XXX fixme name
-def lookupPileup(bam, chr, startCol, endCol):
+def lookupReads(bam, chr, startCol, endCol):
     '''Retrieve the pileup for a particular chromosome:position coordinate.'''
-    # assume argument is in 1-based numbering.
+    # arguments are in zero-based indices
     # samtools gives back a range of pilups that cover the requested coordinates,
     # (no idea why) so we have to search for the particular one we want
 
     # XXX what's the best way to avoid duplicates?
     result = []
     read_ids = set()
-    for read in bam.fetch(chr, startCol-1, endCol):
+    for read in bam.fetch(chr, startCol, endCol+1):
         if read.qname not in read_ids: 
             result.append(read)
             read_ids.add(read.qname)

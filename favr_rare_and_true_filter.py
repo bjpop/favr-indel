@@ -51,11 +51,11 @@ def usage():
     --bin=<bin filename>
     --keep=<keep filename>
     --log=<log filename>
-    --varLikeThresh=<variant read threshold>
+    --varLikePercent=<percent of reads same as variant>
     --samplesPercent=<percent of total samples which pass the threshold>
     reads1.bam reads2.bam ...""") % sys.argv[0]
 
-longOptionsFlags = ["help", "variants=", "bin=", "keep=", "log=", "varLikeThresh=", "samplesPercent="]
+longOptionsFlags = ["help", "variants=", "bin=", "keep=", "log=", "varLikePercent=", "samplesPercent="]
 shortOptionsFlags = "h"
 
 # A place to store command line arguments.
@@ -65,10 +65,10 @@ class Options(object):
         self.bin = None
         self.keep = None
         self.log = None
-        self.varLikeThresh = None
+        self.varLikePercent = None
         self.samplesPercent = None
     def check(self):
-        return all([self.variants, self.bin, self.keep, self.log, self.varLikeThresh, self.samplesPercent])
+        return all([self.variants, self.bin, self.keep, self.log, self.varLikePercent, self.samplesPercent])
 
 def main():
     try:
@@ -87,8 +87,8 @@ def main():
             options.keep = a
         elif o == "--log":
             options.log = a
-        elif o == "--varLikeThresh":
-            options.varLikeThresh = safeReadInt(a)
+        elif o == "--varLikePercent":
+            options.varLikePercent = safeReadInt(a)
         elif o == "--samplesPercent":
             options.samplesPercent = safeReadInt(a)
         elif o in ('-h', '--help'):

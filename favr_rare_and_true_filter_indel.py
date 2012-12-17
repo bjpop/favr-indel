@@ -40,90 +40,94 @@ import pysam
 import sys
 import csv
 import getopt
-from favr_common_indel import (safeReadInt, getEvidence, makeSafeFilename, sortByCoord)
-from favr_rare_and_true_classify import classify
+from favr_common_indel import (safeReadInt, getEvidence,
+    makeSafeFilename, sortByCoord, parseVariantRowVCF, parseVariantRowAnnovar,
+    initEvidence)
+from favr_rare_and_true_classify_indel import classify
+import argparse
 
-# print a usage message
-def usage():
-    print("""Usage: %s
-    [-h | --help]
-    --variants=<variant list as TSV file>
-    --bin=<bin filename>
-    --keep=<keep filename>
-    --log=<log filename>
-    --varLikeThresh=<variant read threshold>
-    --samplesPercent=<percent of total samples which pass the threshold>
-    reads1.bam reads2.bam ...""") % sys.argv[0]
-
-longOptionsFlags = ["help", "variants=", "bin=", "keep=", "log=", "varLikeThresh=", "samplesPercent="]
-shortOptionsFlags = "h"
-
-# A place to store command line arguments.
-class Options(object):
-    def __init__(self):
-        self.variants = None
-        self.bin = None
-        self.keep = None
-        self.log = None
-        self.varLikeThresh = None
-        self.samplesPercent = None
-    def check(self):
-        return all([self.variants, self.bin, self.keep, self.log, self.varLikeThresh, self.samplesPercent])
+parser = argparse.ArgumentParser(description='Filtering of variants based on their presence/absence and abundance in samples from comparators.')
+parser.add_argument('bamFilenames',
+                    nargs='+',
+                    help='Comparator BAM files',
+                    type=str)
+parser.add_argument('--variants_annovar',
+                    metavar='VARS',
+                    type=str,
+                    help='variant file in Annovar format')
+parser.add_argument('--variants_vcf',
+                    metavar='VARS',
+                    type=str,
+                    help='variant file in VCF format')
+parser.add_argument('--bin',
+                    metavar='BIN_FILE',
+                    type=str,
+                    required=True,
+                    help='store binned variants in this file')
+parser.add_argument('--keep',
+                    metavar='KEEP_FILE',
+                    type=str,
+                    required=True,
+                    help='store kept variants in this file')
+parser.add_argument('--log',
+                    metavar='LOG_FILE',
+                    type=str,
+                    required=True,
+                    help='store log messages in this file')
+parser.add_argument('--varLikePercent',
+                    metavar='N',
+                    type=int,
+                    required=True,
+                    help='percentage of reads for a sample same as the variant')
+parser.add_argument('--samplesPercent',
+                    metavar='N',
+                    type=int,
+                    required=True,
+                    help='percent of total samples which pass the threshold')
 
 def main():
-    try:
-        opts, args = getopt.getopt(sys.argv[1:], shortOptionsFlags, longOptionsFlags)
-    except getopt.GetoptError, err:
-        print str(err)
-        usage()
-        sys.exit(2)
-    options = Options()
-    for o, a in opts:
-        if o == "--variants":
-            options.variants = a
-        elif o == "--bin":
-            options.bin = a
-        elif o == "--keep":
-            options.keep = a
-        elif o == "--log":
-            options.log = a
-        elif o == "--varLikeThresh":
-            options.varLikeThresh = safeReadInt(a)
-        elif o == "--samplesPercent":
-            options.samplesPercent = safeReadInt(a)
-        elif o in ('-h', '--help'):
-            usage()
-            sys.exit(0)
-    if not options.check():
-        print('Incorrect arguments')
-        usage()
-        exit(2)
-    bamFilenames = args
-    # Read the rows of the variants TSV file into a list.
-    with open(options.variants, 'rU') as variants:
-        variantList = list(csv.reader(variants, delimiter=',', quotechar='"'))
+    options = parser.parse_args()
+    variants = []
+    if options.variants_annovar and options.variants_vcf:
+        exit('Please only specify variants in one format, either Annovar or VCF')
+    elif options.variants_annovar:
+        with open(options.variants_annovar, 'rU') as variantsFile:
+            for row in csv.reader(variantsFile, delimiter=',', quotechar='"'):
+                variant = parseVariantRowAnnovar(row)
+                if variant:
+                    variants.append(variant)
+    elif options.variants_vcf:
+        with open(options.variants_vcf, 'rU') as variantsFile:
+            for row in csv.reader(variantsFile, delimiter='\t', quotechar='"'):
+                variant = parseVariantRowVCF(row)
+                if variant:
+                    variants.append(variant)
     # compute the presence/absence of each variant in the bam files
-    evidence, variants = getEvidence(variantList, bamFilenames)
+    evidence = initEvidence(variants) 
+    # update the evidence based on reads seen in the bam files
+    getEvidence(evidence, variants, options.bamFilenames)
     # filter the variants
     filter(options, evidence)
 
 def filter(options, evidence):
     '''Decide which variants to keep and which to bin.'''
-    binFilename =  options.bin
+    binFilename = options.bin
     keepFilename = options.keep
     logFilename = options.log
-    with open (logFilename,'w') as logFile:
-        with open(binFilename,'w') as binFile:
-            with open(keepFilename,'wb') as keepFile:
+    with open (logFilename, 'w') as logFile:
+        with open(binFilename, 'w') as binFile:
+            with open(keepFilename, 'wb') as keepFile:
                 csvWriter = csv.writer(keepFile, delimiter='\t', quotechar='|')
                 # sort the variants by coordinate
-                for key,info in sortByCoord(evidence):
+                for key, info in sortByCoord(evidence):
+                    chr, pos = key
+                    pos += 1 # we use 0 based indexing internally and 1 based externally
                     classification = classify(options, info.counts)
                     # record the classification of this variant in the logfile
-                    logFile.write("%s: %s: %s\n" % (key, classification.action, classification.reason))
+                    logFile.write("%s:%d: %s: %s\n" % (chr, pos, classification.action, classification.reason))
                     if classification.action == 'bin':
                         # bin the variant
-                        binFile.write('%s\n' % key)
+                        binFile.write('%s:%d\n' % (chr, pos))
                         for readCount,depth in info.counts:
                             binFile.write('    <vars/coverage: %d/%d>\n' % (readCount,depth))
                     elif classification.action == 'keep':
