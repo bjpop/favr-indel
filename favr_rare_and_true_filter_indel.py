@@ -91,17 +91,20 @@ def main():
     if options.variants_annovar and options.variants_vcf:
         exit('Please only specify variants in one format, either Annovar or VCF')
     elif options.variants_annovar:
-        with open(options.variants_annovar, 'rU') as variantsFile:
-            for row in csv.reader(variantsFile, delimiter=',', quotechar='"'):
-                variant = parseVariantRowAnnovar(row)
-                if variant:
-                    variants.append(variant)
+        variantsFilename = options.variants_annovar
+        reader = lambda file: csv.reader(file, delimiter=',', quotechar='"')
+        variantParser = parseVariantRowAnnovar 
     elif options.variants_vcf:
-        with open(options.variants_vcf, 'rU') as variantsFile:
-            for row in csv.reader(variantsFile, delimiter='\t', quotechar='"'):
-                variant = parseVariantRowVCF(row)
-                if variant:
-                    variants.append(variant)
+        variantsFilename = options.variants_vcf
+        reader = lambda file: csv.reader(file, delimiter='\t', quotechar='"')
+        variantParser = parseVariantRowVCF 
+    else:
+        exit('Please specify which variant format to use, either Annovar or VCF')
+    with open(variantsFilename, 'rU') as variantsFile:
+        for row in reader(variantsFile):
+            variant = variantParser(row)
+            if variant:
+                variants.append(variant)
     # compute the presence/absence of each variant in the bam files
     evidence = initEvidence(variants) 
     # update the evidence based on reads seen in the bam files
