@@ -57,6 +57,17 @@ def getEvidence(evidence, variants, bamFilenames):
            countVariants(evidence, variants, bam)
     #return evidence 
 
+# counts various kinds of signals we are looking for in the data
+class Counter(object):
+    def __init__(self):
+        self.snv_exact = 0
+        self.indel_exact = 0
+        self.indel_with_clipping = 0
+
+    def __str__(self):
+        return "(snv_exact = {}, indel_exact = {}, indel_with_clipping = {})" \
+               .format(self.snv_exact, self.indel_exact, self.indel_with_clipping)
+
 class EvidenceInfo(object):
     def __init__(self, inputRow, counts):
         # original row from the input file
@@ -73,18 +84,19 @@ def initEvidence(variants):
 def showEvidence(evidence):
     '''Print out the frequency counter for each variant.'''
     for chrPos,info in evidence.items():
-        print("%s %s" % (info.inputRow,str(info.counts)))
+        print("%s %s" % (info.inputRow, str(info.counts)))
 
 def countVariants(evidence, variants, bam):
     '''For each variant in the list, check if it is evident in this particular sample BAM.'''
     for variant in variants:
         reads = lookupReads(bam, variant.chromosome, variant.startPosition, variant.endPosition)
-        sameAsVariant = 0
+        # sameAsVariant = 0
+        counter = Counter() # initialise zero counter
         coverage = len(reads)
         for read in reads:
-            if variant.inAlignment(read):
-                sameAsVariant += 1
-        evidence[variant.id].counts.append((sameAsVariant,coverage))
+            # update the counter
+            variant.inAlignment(read, counter)
+        evidence[variant.id].counts.append((counter, coverage))
 
 class Variant(object):
     def __init__(self, id, chromosome, startPosition, endPosition, inputRow):
@@ -106,16 +118,21 @@ class SNV(Variant):
                 self.startPosition + 1, self.refBase, self.variantBase)
 
     # XXX untested
-    def inAlignment(self, alignment):
+    def inAlignment(self, alignment, counter):
         target = self.startPosition - alignment.pos
         offset = 0
         for cigar in cigarToCoords(alignment):
             if target < 0:
-                return False
+                #return False
+                # don't update the counter
+                return
             # An SNV can only appear inside a Matched sequence
             elif cigar.code == 'M':
                 if 0 <= target < cigar.length:
-                    return self.variantBase == alignment.query[offset + target]
+                    #return self.variantBase == alignment.query[offset + target]
+                    if self.variantBase == alignment.query[offset + target]:
+                        counter.snv_exact += 1
+                        return
                 else:
                     offset += cigar.length
                     target -= cigar.length
@@ -123,8 +140,9 @@ class SNV(Variant):
                 offset += cigar.length
             elif cigar.code == 'D':
                 target -= cigar.length
-        return False
-
+        #return False
+        # don't update the counter
+        return
 
 class Deletion(Variant):
     def __init__(self, id, chromosome, startPosition, endPosition, inputRow):
@@ -135,14 +153,18 @@ class Deletion(Variant):
         return "Deletion({},{},{})".format(self.chromosome,
                 self.startPosition + 1, self.endPosition + 1)
 
-    def inAlignment(self, alignment):
+    def inAlignment(self, alignment, counter):
         cigar_coords = cigarToCoords(alignment)
         for cigar in cigar_coords:
             if (cigar.code == 'D' and
                 cigar.start == self.startPosition and
                 cigar.start + cigar.length - 1 == self.endPosition):
-                return True
-        return False
+                #return True
+                counter.indel_exact += 1
+                return
+        # return False
+        # don't update the counter
+        return
 
 class Insertion(Variant):
     def __init__(self, id, chromosome, startPosition, inputRow, insertedBases):
@@ -154,13 +176,16 @@ class Insertion(Variant):
         return "Insertion({},{},{},{})".format(self.chromosome,
                 self.startPosition + 1, self.endPosition + 1, self.insertedBases)
 
-    def inAlignment(self, alignment):
+    def inAlignment(self, alignment, counter):
         cigar_coords = cigarToCoords(alignment)
         for cigar in cigar_coords:
             # XXX should check that the inserted bases are the same
             if cigar.code == 'I' and cigar.start == self.startPosition:
-                return True
-        return False
+                #return True
+                counter.indel_exact += 1 
+        #return False
+        # don't update the counter
+        return
 
 class CigarCoord(object):
     def __init__(self, code, start, length):

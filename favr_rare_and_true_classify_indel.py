@@ -27,26 +27,32 @@ class Classify(object):
 # one per sample, where
 #    readCount is the number of reads in a sample which match the variant (at the same position)
 #    depth is the number of reads in a sample covering the same position as the variant (aka coverage)
+
+# XXX handle different kinds of counters
 def classify(options, variantInfo):
     #varLikeThresh = options.varLikeThresh
-    varLikePercent = options.varLikePercent
+    #varLikePercent = options.varLikePercent
     samplesPercent = options.samplesPercent
     totalSamples = 0     # number of sample files
     binableSamples = 0   # number of samples which are considered binable
-    totalSameAsVariants = 0    # total number of reads which had a base the same as the variant in the same position
-    for readCount,depth in variantInfo:
+    for readCount, depth in variantInfo:
         totalSamples += 1
-        if (depth > 0) and ((float(readCount) / depth * 100.0) >= varLikePercent):
+        #if (depth > 0) and ((float(readCount) / depth * 100.0) >= varLikePercent):
+        if (depth > 0) and percentage(readCount, depth) >= varLikePercent:
             binableSamples += 1
-        totalSameAsVariants += readCount
     if totalSamples > 0:
         #if (binableSamples * 100 / totalSamples) >= samplesPercent:
-        if (float(binableSamples) / totalSamples * 100.0) >= samplesPercent:
+        #if (float(binableSamples) / totalSamples * 100.0) >= samplesPercent:
+        if percentage(binableSamples, totalSamples) >= samplesPercent:
             return Classify('bin', binThresholdMessage % (binableSamples, totalSamples, samplesPercent))
         else:
             return Classify('keep', keepMessage % (binableSamples, totalSamples, samplesPercent))
     else:
         return Classify('bin', binZeroSamplesMessage)
+
+# assumes denominator is not zero
+def percentage(numerator, denominator):
+    return (float(numerator) / denominator) * 100.0
 
 binThresholdMessage = '(binableSamples(=%d) * 100 / totalSamples(=%d)) >= samplesPercent(=%d)'
 binZeroSamplesMessage = 'there were zero samples to compare with'
