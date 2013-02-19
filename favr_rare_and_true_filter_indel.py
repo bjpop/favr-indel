@@ -117,9 +117,9 @@ def main():
     # XXX temporaily to see the counts
     for key, info in sortByCoord(evidence):
         print '%s %s' % (key, info)
-    # filter the variants
     # XXX need to be comment out after considering percentage calcuation
     # with respect to each type of variants (SVN, indel, indel with clipping)
+    # filter the variants
     #filter(options, evidence)
 
 def filter(options, evidence):
