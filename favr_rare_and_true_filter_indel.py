@@ -84,6 +84,11 @@ parser.add_argument('--samplesPercent',
                     type=int,
                     required=True,
                     help='percent of total samples which pass the threshold')
+parser.add_argument('--windowvar',
+                    metavar='N',
+                    type=int,
+                    required=True,
+                    help='the window variance for finding clippings')
 
 def main():
     options = parser.parse_args()
@@ -108,9 +113,14 @@ def main():
     # compute the presence/absence of each variant in the bam files
     evidence = initEvidence(variants) 
     # update the evidence based on reads seen in the bam files
-    getEvidence(evidence, variants, options.bamFilenames)
+    getEvidence(evidence, variants, options.bamFilenames, options.windowvar)
+    # XXX temporaily to see the counts
+    for key, info in sortByCoord(evidence):
+        print '%s %s' % (key, info)
     # filter the variants
-    filter(options, evidence)
+    # XXX need to be comment out after considering percentage calcuation
+    # with respect to each type of variants (SVN, indel, indel with clipping)
+    #filter(options, evidence)
 
 def filter(options, evidence):
     '''Decide which variants to keep and which to bin.'''

@@ -48,13 +48,13 @@ def compareChrCode(code1, code2):
     else:
         return cmp(code1, code2)
 
-def getEvidence(evidence, variants, bamFilenames):
+def getEvidence(evidence, variants, bamFilenames, windowVar):
     #evidence, variants = initEvidence(variantList)
     # Iterate over sample BAM files.
     for bamFile in bamFilenames:
        with pysam.Samfile(bamFile, "rb") as bam:
            # Count how many samples have each particular variant.
-           countVariants(evidence, variants, bam)
+           countVariants(evidence, variants, bam, windowVar)
     #return evidence 
 
 # counts various kinds of signals we are looking for in the data
@@ -73,7 +73,12 @@ class EvidenceInfo(object):
         # original row from the input file
         self.inputRow = inputRow 
         # list of pairs: (reads same as variant, coverage)
-        self.counts = counts 
+        self.counts = counts
+    def __str__(self):
+        # XXX inputRow has too much information to just see the counts
+        return "counts: {}, coverage:{} " \
+                .format(' '.join([str(count) for count, coverage in self.counts]),
+                        ' '.join([str(coverage) for count, coverage in self.counts]))
 
 def initEvidence(variants):
     evidence = {}
@@ -86,9 +91,14 @@ def showEvidence(evidence):
     for chrPos,info in evidence.items():
         print("%s %s" % (info.inputRow, str(info.counts)))
 
-def countVariants(evidence, variants, bam):
+def countVariants(evidence, variants, bam, windowVar):
     '''For each variant in the list, check if it is evident in this particular sample BAM.'''
     for variant in variants:
+        # XXX need logger?
+        print '='*30
+        print 'variants start %d end %d (one-based)' % \
+               (variant.startPosition+1, variant.endPosition+1)
+
         reads = lookupReads(bam, variant.chromosome, variant.startPosition, variant.endPosition)
         # sameAsVariant = 0
         counter = Counter() # initialise zero counter
@@ -96,7 +106,68 @@ def countVariants(evidence, variants, bam):
         for read in reads:
             # update the counter
             variant.inAlignment(read, counter)
+        
+        # count nearby clippings if variant is insertion or deletion
+        if isinstance(variant, Insertion) or isinstance(variant, Deletion):
+            # widen the window to get reads which
+            # have clipping at variant position,
+            # because pysam.fetch does not return the read that
+            # has clipping on the query range.
+            # look up reads that intersect window variance
+            clipping_var_start = variant.startPosition - windowVar
+            clipping_var_end = variant.endPosition + windowVar
+            reads_clipping = lookupReads(bam, variant.chromosome,
+                                         clipping_var_start, clipping_var_end)
+            # XXX need to consider two different coverage,
+            # one is for exact match, the other is for nearby clipping.
+            coverage_clipping = len(reads_clipping)
+            # while getting clipping for each reads,
+            # increase counter by 1 if the clipping is on the variant position.
+            for clipping in get_clipping_in_alignments(reads_clipping):
+                if clipping.isNearby(variant):
+                    counter.indel_with_clipping += 1
+                    # XXX need logger?
+                    print clipping, 'is on', variant
+
         evidence[variant.id].counts.append((counter, coverage))
+
+class Clipping(object):
+    def __init__(self, startPosition, endPosition):
+        self.startPosition = startPosition
+        self.endPosition = endPosition
+
+    # Pretty print, showing start position in one-based form
+    def __str__(self):
+        return "Clipping({},{})".format(self.startPosition + 1,
+                self.endPosition + 1)
+        
+    def isNearby(self, variant):
+        '''Return True if this clipping intersects with or
+           is within the variant.'''
+        clipping_start = self.startPosition
+        clipping_end = self.endPosition
+        variant_start = variant.startPosition
+        variant_end = variant.endPosition
+        # intersect on the left
+        if (clipping_start <= variant_start and
+            clipping_end >= variant_start):
+            return True
+        # within variant
+        elif (clipping_start > variant_start and
+              clipping_end <= variant_end):
+            return True
+        # intersect on the right
+        elif (clipping_start <= variant_end and
+              clipping_end >= variant_end):
+            return True
+        return False
+
+def get_clipping_in_alignments(alignments):
+    for alignment in alignments:
+        cigar_coords = cigarToCoords(alignment)
+        for cigar in cigar_coords:
+            if cigar.code == 'S' or cigar.code == 'H':
+                yield Clipping(cigar.start, cigar.start + cigar.length - 1)
 
 class Variant(object):
     def __init__(self, id, chromosome, startPosition, endPosition, inputRow):
@@ -159,10 +230,7 @@ class Deletion(Variant):
             if (cigar.code == 'D' and
                 cigar.start == self.startPosition and
                 cigar.start + cigar.length - 1 == self.endPosition):
-                #return True
                 counter.indel_exact += 1
-                return
-        # return False
         # don't update the counter
         return
 
@@ -182,7 +250,7 @@ class Insertion(Variant):
             # XXX should check that the inserted bases are the same
             if cigar.code == 'I' and cigar.start == self.startPosition:
                 #return True
-                counter.indel_exact += 1 
+                counter.indel_exact += 1
         #return False
         # don't update the counter
         return
@@ -194,6 +262,8 @@ class CigarCoord(object):
         self.code = code
         self.start = start # zero based
         self.length = length
+    def __str__(self):
+        return '(code %s start %d length %d)' % (self.code, self.start, self.length)
 
 def cigarToCoords(alignment):
     # pos is the reference position of the first aligned base in the read
@@ -205,7 +275,7 @@ def cigarToCoords(alignment):
     if cigar == None:
         return [] 
     result = []
-    for code,length in cigar:
+    for n, (code,length) in enumerate(cigar):
         if code == 0:
             # Match
             result.append(CigarCoord('M', pos, length))
@@ -229,12 +299,38 @@ def cigarToCoords(alignment):
             #result.append(('D', pos, pos + length - 1))
             result.append(CigarCoord('D', pos, length))
             pos += length
+        elif code == 4:
+            # Soft clipping
+            # The sequence of read is not aligned from the first residue or
+            # to the last residue.
+            # If the clipped alignment is on the first residue,
+            # the position should be alignment.pos - length,
+            # since the alignment.pos starts from the first aligned base.
+            # If the clipped alignmet is on the end residue,
+            # the position should be pos.
+            clipping_pos = 0
+            if n == 0:  # the first residue
+                clipping_pos = pos - length
+            else:
+                clipping_pos = pos
+            result.append(CigarCoord('S', clipping_pos, length))
+        elif code == 5:
+            # Hard clipping
+            # Similar to Soft clipping
+            # The difference is that the hard clipped subsequence is not
+            # present in the alignment record.
+            # This means that there is no difference in handling
+            # Hard Clipping for us.
+            clipping_pos = 0
+            if n == 0:  # the first residue
+                clipping_pos = pos - length
+            else:
+                clipping_pos = pos
+            result.append(CigarCoord('H', clipping_pos, length))
         else:
-            # 'N', 4 : 'S', 5 : 'H', 6 : 'P', 7 : '=', 8 : 'X' 
+            # 3 : 'N', 6 : 'P', 7 : '=', 8 : 'X' 
             # we ignore the other types of cigar codes for the moment
-            # can can safely ignore soft and hard clipping because they
-            # only appear at the ends of the read outside the mapped
-            # section. We should probably handle N, which is a skipped
+            # We should probably handle N, which is a skipped
             # base. N is like a deletion. P is for padding which is
             # needed in multiple alignments but may not be relevent to us.
             pass
