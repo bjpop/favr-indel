@@ -87,7 +87,7 @@ parser.add_argument('--samplesPercent',
 parser.add_argument('--windowvar',
                     metavar='N',
                     type=int,
-                    required=True,
+                    default=10,
                     help='the window variance for finding clippings')
 
 def main():
