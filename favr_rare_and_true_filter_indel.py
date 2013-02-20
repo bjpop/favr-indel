@@ -84,10 +84,12 @@ parser.add_argument('--samplesPercent',
                     type=int,
                     required=True,
                     help='percent of total samples which pass the threshold')
+# XXX this windowvar is for both nearby clipping and nearby indels.
+# should we have two options separately?
 parser.add_argument('--windowvar',
                     metavar='N',
                     type=int,
-                    default=10,
+                    default=0,
                     help='the window variance for finding clippings')
 
 def main():

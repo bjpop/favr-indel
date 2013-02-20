@@ -58,15 +58,20 @@ def getEvidence(evidence, variants, bamFilenames, windowVar):
     #return evidence 
 
 # counts various kinds of signals we are looking for in the data
+# XXX need snv_nearby? snv_similar?
 class Counter(object):
     def __init__(self):
         self.snv_exact = 0
         self.indel_exact = 0
-        self.indel_with_clipping = 0
+        self.indel_with_clipping = 0 # clipping on window
+        self.indel_similar = 0  # indel on window with same size and same nature
+        self.indel_nearby = 0  # indel on window but not similar
 
     def __str__(self):
-        return "(snv_exact = {}, indel_exact = {}, indel_with_clipping = {})" \
-               .format(self.snv_exact, self.indel_exact, self.indel_with_clipping)
+        return "(snv_exact = {}, indel_exact = {}, indel_with_clipping = {} \
+                indel_nearby = {} indel_similar = {})" \
+               .format(self.snv_exact, self.indel_exact, self.indel_with_clipping,
+                       self.indel_nearby, self.indel_similar)
 
 class EvidenceInfo(object):
     def __init__(self, inputRow, counts):
@@ -94,80 +99,17 @@ def showEvidence(evidence):
 def countVariants(evidence, variants, bam, windowVar):
     '''For each variant in the list, check if it is evident in this particular sample BAM.'''
     for variant in variants:
-        # XXX need logger?
-        print '='*30
-        print 'variants start %d end %d (one-based)' % \
-               (variant.startPosition+1, variant.endPosition+1)
-
-        reads = lookupReads(bam, variant.chromosome, variant.startPosition, variant.endPosition)
-        # sameAsVariant = 0
-        counter = Counter() # initialise zero counter
+        # look up reads overlapping window 
+        window_start = variant.startPosition - windowVar
+        window_end = variant.endPosition + windowVar
+        reads = lookupReads(bam, variant.chromosome, window_start, window_end)
+        counter = Counter()
+        # XXX coverage is the number of reads intersect window
         coverage = len(reads)
         for read in reads:
-            # update the counter
-            variant.inAlignment(read, counter)
-        
-        # count nearby clippings if variant is insertion or deletion
-        if isinstance(variant, Insertion) or isinstance(variant, Deletion):
-            # widen the window to get reads which
-            # have clipping at variant position,
-            # because pysam.fetch does not return the read that
-            # has clipping on the query range.
-            # look up reads that intersect window variance
-            clipping_var_start = variant.startPosition - windowVar
-            clipping_var_end = variant.endPosition + windowVar
-            reads_clipping = lookupReads(bam, variant.chromosome,
-                                         clipping_var_start, clipping_var_end)
-            # XXX need to consider two different coverage,
-            # one is for exact match, the other is for nearby clipping.
-            coverage_clipping = len(reads_clipping)
-            # while getting clipping for each reads,
-            # increase counter by 1 if the clipping is on the variant position.
-            for clipping in get_clipping_in_alignments(reads_clipping):
-                if clipping.isNearby(variant):
-                    counter.indel_with_clipping += 1
-                    # XXX need logger?
-                    print clipping, 'is on', variant
+            variant.inAlignment(read, counter, windowVar)
 
         evidence[variant.id].counts.append((counter, coverage))
-
-class Clipping(object):
-    def __init__(self, startPosition, endPosition):
-        self.startPosition = startPosition
-        self.endPosition = endPosition
-
-    # Pretty print, showing start position in one-based form
-    def __str__(self):
-        return "Clipping({},{})".format(self.startPosition + 1,
-                self.endPosition + 1)
-        
-    def isNearby(self, variant):
-        '''Return True if this clipping intersects with or
-           is within the variant.'''
-        clipping_start = self.startPosition
-        clipping_end = self.endPosition
-        variant_start = variant.startPosition
-        variant_end = variant.endPosition
-        # intersect on the left
-        if (clipping_start <= variant_start and
-            clipping_end >= variant_start):
-            return True
-        # within variant
-        elif (clipping_start > variant_start and
-              clipping_end <= variant_end):
-            return True
-        # intersect on the right
-        elif (clipping_start <= variant_end and
-              clipping_end >= variant_end):
-            return True
-        return False
-
-def get_clipping_in_alignments(alignments):
-    for alignment in alignments:
-        cigar_coords = cigarToCoords(alignment)
-        for cigar in cigar_coords:
-            if cigar.code == 'S' or cigar.code == 'H':
-                yield Clipping(cigar.start, cigar.start + cigar.length - 1)
 
 class Variant(object):
     def __init__(self, id, chromosome, startPosition, endPosition, inputRow):
@@ -189,7 +131,7 @@ class SNV(Variant):
                 self.startPosition + 1, self.refBase, self.variantBase)
 
     # XXX untested
-    def inAlignment(self, alignment, counter):
+    def inAlignment(self, alignment, counter, windowVar):
         target = self.startPosition - alignment.pos
         offset = 0
         for cigar in cigarToCoords(alignment):
@@ -224,14 +166,36 @@ class Deletion(Variant):
         return "Deletion({},{},{})".format(self.chromosome,
                 self.startPosition + 1, self.endPosition + 1)
 
-    def inAlignment(self, alignment, counter):
+    def inAlignment(self, alignment, counter, windowVar):
+        # exact: exactly same position, size and nature
+        # similar: different position, but same size and nature
+        # nearby: different position, size and nature
+        # XXX different position allows position intersecting window boundary
+        window_start = self.startPosition - windowVar
+        window_end = self.endPosition + windowVar
         cigar_coords = cigarToCoords(alignment)
+
         for cigar in cigar_coords:
-            if (cigar.code == 'D' and
-                cigar.start == self.startPosition and
-                cigar.start + cigar.length - 1 == self.endPosition):
-                counter.indel_exact += 1
-        # don't update the counter
+            cigar_start = cigar.start
+            cigar_end = cigar.start + cigar.length - 1
+            if cigar.code == 'D':  # exact, similar, nearby
+                if (cigar_start == self.startPosition and
+                    cigar_end == self.endPosition):
+                    counter.indel_exact += 1
+                elif hasOverlapBetween(window_start, window_end,
+                                       cigar_start, cigar_end):
+                    if self.endPosition - self.startPosition + 1 == cigar.length: 
+                        counter.indel_similar += 1
+                    else:
+                        counter.indel_nearby += 1
+            if cigar.code == 'I':  # nearby
+                if hasOverlapBetween(window_start, window_end,
+                                     cigar_start, cigar_end):
+                    counter.indel_nearby += 1
+            if cigar.code == 'S' or cigar.code == 'H':  # clipping
+                if hasOverlapBetween(window_start, window_end,
+                                     cigar_start, cigar_end):
+                    counter.indel_with_clipping += 1
         return
 
 class Insertion(Variant):
@@ -244,16 +208,52 @@ class Insertion(Variant):
         return "Insertion({},{},{},{})".format(self.chromosome,
                 self.startPosition + 1, self.endPosition + 1, self.insertedBases)
 
-    def inAlignment(self, alignment, counter):
+    def inAlignment(self, alignment, counter, windowVar):
+        # exact: exactly same position, size and nature
+        # similar: different position, but same size and nature
+        # nearby: different position, size and nature
+        # XXX different position allows position intersecting window boundary
+        window_start = self.startPosition - windowVar
+        window_end = self.endPosition + windowVar
         cigar_coords = cigarToCoords(alignment)
         for cigar in cigar_coords:
-            # XXX should check that the inserted bases are the same
-            if cigar.code == 'I' and cigar.start == self.startPosition:
-                #return True
-                counter.indel_exact += 1
-        #return False
-        # don't update the counter
+            if cigar.code == 'I':  # exact, similar, nearby
+                # XXX should check that the inserted bases are the same
+                if (cigar.start == self.startPosition and
+                    len(self.insertedBases) == cigar.length):
+                    counter.indel_exact += 1
+                elif hasOverlapBetween(window_start, window_end,
+                                       cigar.start, cigar.start + cigar.length - 1):
+                    if len(self.insertedBases) == cigar.length:
+                        counter.indel_similar += 1
+                    else:
+                        counter.indel_nearby += 1
+            if cigar.code == 'D':  # nearby
+                if hasOverlapBetween(window_start, window_end,
+                                     cigar.start, cigar.start + cigar.length - 1):
+                    counter.indel_nearby += 1
+            if cigar.code == 'S' or cigar.code == 'H':  # clipping
+                if hasOverlapBetween(window_start, window_end,
+                                     cigar.start, cigar.start + cigar.length - 1):
+                    counter.indel_with_clipping += 1
+
         return
+
+def hasOverlapBetween(target_start, target_end,
+                      query_start, query_end, intersect=True):
+    # within target region
+    if (query_start >= target_start and
+         query_end <= target_end):
+        return True
+    # could intersect the target region
+    elif intersect:
+        if (query_start <= target_start and  # on left
+            query_end >= target_start):
+            return True
+        elif (query_start <= target_end and  # on right
+              query_end >= target_end):
+            return True    
+    return False
 
 class CigarCoord(object):
     def __init__(self, code, start, length):
@@ -262,6 +262,7 @@ class CigarCoord(object):
         self.code = code
         self.start = start # zero based
         self.length = length
+
     def __str__(self):
         return '(code %s start %d length %d)' % (self.code, self.start, self.length)
 
