@@ -57,38 +57,40 @@ def getEvidence(evidence, variants, bamFilenames, windowVar):
            countVariants(evidence, variants, bam, windowVar)
     #return evidence 
 
-# counts various kinds of signals we are looking for in the data
-# XXX need snv_nearby? snv_similar?
-class Counter(object):
-    def __init__(self):
-        self.snv_exact = 0
-        self.indel_exact = 0
-        self.indel_with_clipping = 0 # clipping on window
-        self.indel_similar = 0  # indel on window with same size and same nature
-        self.indel_nearby = 0  # indel on window but not similar
 
+class Count(object):
+    def __init__(self, count, depth):
+        self.count = count
+        self.depth = depth
     def __str__(self):
-        return "(snv_exact = {}, indel_exact = {}, indel_with_clipping = {} \
-                indel_nearby = {} indel_similar = {})" \
-               .format(self.snv_exact, self.indel_exact, self.indel_with_clipping,
-                       self.indel_nearby, self.indel_similar)
+        return "(count={}, depth={})".format(self.count, self.depth)
 
+# Each variant has a list of Feature class that
+# includes counting results for each bam file.
+# the length of list should be equal to the number of the bam file.
 class EvidenceInfo(object):
-    def __init__(self, inputRow, counts):
+    def __init__(self, inputRow, features):
         # original row from the input file
         self.inputRow = inputRow 
-        # list of pairs: (reads same as variant, coverage)
-        self.counts = counts
-    def __str__(self):
-        # XXX inputRow has too much information to just see the counts
-        return "counts: {}, coverage:{} " \
-                .format(' '.join([str(count) for count, coverage in self.counts]),
-                        ' '.join([str(coverage) for count, coverage in self.counts]))
+        # each variant has a list of features. (one feature for one bam file)
+        self.features = features
+
+# counts various kinds of signals we are looking for in the data
+# Each feature has a Count class.
+# If a feature is None, that means we did not count against the feature.
+class Features(object):
+    def __init__(self):
+        self.snv_exact = None
+        self.indel_exact = None
+        self.indel_similar = None
+        self.indel_nearby = None
+        self.indel_with_clipping= None
+
 
 def initEvidence(variants):
     evidence = {}
     for variant in variants:
-        evidence[variant.id] = EvidenceInfo(inputRow = variant.inputRow, counts = [])
+        evidence[variant.id] = EvidenceInfo(inputRow=variant.inputRow, features=[])
     return evidence
 
 def showEvidence(evidence):
@@ -96,20 +98,23 @@ def showEvidence(evidence):
     for chrPos,info in evidence.items():
         print("%s %s" % (info.inputRow, str(info.counts)))
 
-def countVariants(evidence, variants, bam, windowVar):
+def countVariants(evidence, variants, bam, windowDelta):
     '''For each variant in the list, check if it is evident in this particular sample BAM.'''
     for variant in variants:
-        # look up reads overlapping window 
-        window_start = variant.startPosition - windowVar
-        window_end = variant.endPosition + windowVar
+        # look up reads overlapping window
+        window_start, window_end = variant.getWindowBoundaries(windowDelta) 
         reads = lookupReads(bam, variant.chromosome, window_start, window_end)
-        counter = Counter()
         # XXX coverage is the number of reads intersect window
         coverage = len(reads)
-        for read in reads:
-            variant.inAlignment(read, counter, windowVar)
+        features = Features()
+        # initialise Features to set what features would be 
+        # counted for the variant, and set the coverage.
+        variant.initFeatures(features, coverage)
 
-        evidence[variant.id].counts.append((counter, coverage))
+        for read in reads:
+            variant.inAlignment(read, features, windowDelta)
+
+        evidence[variant.id].features.append(features)
 
 class Variant(object):
     def __init__(self, id, chromosome, startPosition, endPosition, inputRow):
@@ -131,7 +136,7 @@ class SNV(Variant):
                 self.startPosition + 1, self.refBase, self.variantBase)
 
     # XXX untested
-    def inAlignment(self, alignment, counter, windowVar):
+    def inAlignment(self, alignment, features, windowVar):
         target = self.startPosition - alignment.pos
         offset = 0
         for cigar in cigarToCoords(alignment):
@@ -144,7 +149,7 @@ class SNV(Variant):
                 if 0 <= target < cigar.length:
                     #return self.variantBase == alignment.query[offset + target]
                     if self.variantBase == alignment.query[offset + target]:
-                        counter.snv_exact += 1
+                        features.snv_exact.count += 1
                         return
                 else:
                     offset += cigar.length
@@ -157,7 +162,30 @@ class SNV(Variant):
         # don't update the counter
         return
 
-class Deletion(Variant):
+    def initFeatures(self, features, coverage):
+        # XXX for snv, we only consider the exact match
+        features.snv_exact = Count(0, coverage)
+        
+    def getWindowBoundaries(self, windowDelta):
+        # for SNV, ignore windowDelta, since we only consider exact match.
+        return (self.startPosition, self.endPosition)
+        
+class Indel(Variant):
+    def __init__(self, id, chromosome, startPosition, endPosition, inputRow):
+        super(Indel, self).__init__(id, chromosome, startPosition, endPosition, inputRow)
+
+    def initFeatures(self, features, coverage):
+        # XXX coverage maybe different for each feature
+        # but now not consider the complexity
+        features.indel_exact = Count(0, coverage)
+        features.indel_similar = Count(0, coverage)
+        features.indel_nearby = Count(0, coverage)
+        features.indel_with_clipping = Count(0, coverage)
+
+    def getWindowBoundaries(self, windowDelta):
+        return (self.startPosition - windowDelta, self.endPosition + windowDelta)
+
+class Deletion(Indel):
     def __init__(self, id, chromosome, startPosition, endPosition, inputRow):
         super(Deletion, self).__init__(id, chromosome, startPosition, endPosition, inputRow)
 
@@ -166,13 +194,13 @@ class Deletion(Variant):
         return "Deletion({},{},{})".format(self.chromosome,
                 self.startPosition + 1, self.endPosition + 1)
 
-    def inAlignment(self, alignment, counter, windowVar):
+    def inAlignment(self, alignment, features, windowDelta):
         # exact: exactly same position, size and nature
         # similar: different position, but same size and nature
         # nearby: different position, size and nature
         # XXX different position allows position intersecting window boundary
-        window_start = self.startPosition - windowVar
-        window_end = self.endPosition + windowVar
+        window_start = self.startPosition - windowDelta
+        window_end = self.endPosition + windowDelta
         cigar_coords = cigarToCoords(alignment)
 
         for cigar in cigar_coords:
@@ -181,24 +209,33 @@ class Deletion(Variant):
             if cigar.code == 'D':  # exact, similar, nearby
                 if (cigar_start == self.startPosition and
                     cigar_end == self.endPosition):
-                    counter.indel_exact += 1
+                    features.indel_exact.count += 1
                 elif hasOverlapBetween(window_start, window_end,
                                        cigar_start, cigar_end):
                     if self.endPosition - self.startPosition + 1 == cigar.length: 
-                        counter.indel_similar += 1
+                        features.indel_similar.count += 1
                     else:
-                        counter.indel_nearby += 1
+                        features.indel_nearby.count += 1
             if cigar.code == 'I':  # nearby
                 if hasOverlapBetween(window_start, window_end,
                                      cigar_start, cigar_end):
-                    counter.indel_nearby += 1
+                    features.indel_nearby.count += 1
             if cigar.code == 'S' or cigar.code == 'H':  # clipping
                 if hasOverlapBetween(window_start, window_end,
                                      cigar_start, cigar_end):
-                    counter.indel_with_clipping += 1
+                    features.indel_with_clipping.count += 1
         return
 
-class Insertion(Variant):
+    def initFeatures(self, features, coverage):
+        return super(Deletion, self).initFeatures(features, coverage)
+
+#    def updateFeatures(self, features, counter):
+#        super(Deletion, self).updateFeatures(features, counter)
+
+    def getWindowBoundaries(self, windowDelta):
+        return super(Deletion, self).getWindowBoundaries(windowDelta)
+
+class Insertion(Indel):
     def __init__(self, id, chromosome, startPosition, inputRow, insertedBases):
         super(Insertion, self).__init__(id, chromosome, startPosition, startPosition, inputRow)
         self.insertedBases = insertedBases 
@@ -208,7 +245,7 @@ class Insertion(Variant):
         return "Insertion({},{},{},{})".format(self.chromosome,
                 self.startPosition + 1, self.endPosition + 1, self.insertedBases)
 
-    def inAlignment(self, alignment, counter, windowVar):
+    def inAlignment(self, alignment, features, windowVar):
         # exact: exactly same position, size and nature
         # similar: different position, but same size and nature
         # nearby: different position, size and nature
@@ -221,23 +258,32 @@ class Insertion(Variant):
                 # XXX should check that the inserted bases are the same
                 if (cigar.start == self.startPosition and
                     len(self.insertedBases) == cigar.length):
-                    counter.indel_exact += 1
+                    features.indel_exact.count += 1
                 elif hasOverlapBetween(window_start, window_end,
                                        cigar.start, cigar.start + cigar.length - 1):
                     if len(self.insertedBases) == cigar.length:
-                        counter.indel_similar += 1
+                        features.indel_similar.count += 1
                     else:
-                        counter.indel_nearby += 1
+                        features.indel_nearby.count += 1
             if cigar.code == 'D':  # nearby
                 if hasOverlapBetween(window_start, window_end,
                                      cigar.start, cigar.start + cigar.length - 1):
-                    counter.indel_nearby += 1
+                    features.indel_nearby.count += 1
             if cigar.code == 'S' or cigar.code == 'H':  # clipping
                 if hasOverlapBetween(window_start, window_end,
                                      cigar.start, cigar.start + cigar.length - 1):
-                    counter.indel_with_clipping += 1
+                    features.indel_with_clipping.count += 1
 
         return
+
+    def initFeatures(self, features, coverage):
+        return super(Insertion, self).initFeatures(features, coverage)
+
+#    def updateFeatures(self, features, counter):
+#        super(Insertion, self).updateFeatures(features, counter)
+
+    def getWindowBoundaries(self, windowDelta):
+        return super(Insertion, self).getWindowBoundaries(windowDelta)
 
 def hasOverlapBetween(target_start, target_end,
                       query_start, query_end, intersect=True):

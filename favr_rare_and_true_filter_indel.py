@@ -91,7 +91,13 @@ parser.add_argument('--windowvar',
                     type=int,
                     default=0,
                     help='the window variance for finding clippings')
-
+# XXX now allow only one feature at a time.
+# should allow multiple simultaneous features.
+parser.add_argument('--feature',
+                    metavar='FEATURE',
+                    type=str,
+                    required=True,
+                    help='the feature that would be used for filtering')
 def main():
     options = parser.parse_args()
     variants = []
@@ -116,13 +122,9 @@ def main():
     evidence = initEvidence(variants) 
     # update the evidence based on reads seen in the bam files
     getEvidence(evidence, variants, options.bamFilenames, options.windowvar)
-    # XXX temporaily to see the counts
-    for key, info in sortByCoord(evidence):
-        print '%s %s' % (key, info)
-    # XXX need to be comment out after considering percentage calcuation
     # with respect to each type of variants (SVN, indel, indel with clipping)
     # filter the variants
-    #filter(options, evidence)
+    filter(options, evidence)
 
 def filter(options, evidence):
     '''Decide which variants to keep and which to bin.'''
@@ -137,14 +139,17 @@ def filter(options, evidence):
                 for key, info in sortByCoord(evidence):
                     chr, pos = key
                     pos += 1 # we use 0 based indexing internally and 1 based externally
-                    classification = classify(options, info.counts)
+                    classification = classify(options, info.features)
                     # record the classification of this variant in the logfile
                     logFile.write("%s:%d: %s: %s\n" % (chr, pos, classification.action, classification.reason))
                     if classification.action == 'bin':
                         # bin the variant
                         binFile.write('%s:%d\n' % (chr, pos))
-                        for readCount,depth in info.counts:
-                            binFile.write('    <vars/coverage: %d/%d>\n' % (readCount,depth))
+                        # XXX should handle multiple features
+                        # should comment out after finding better way
+                        # to get counts for each feature
+                        #for features in info.features:
+                        #    binFile.write('    <vars/coverage: %d/%d>\n' % (readCount,depth))
                     elif classification.action == 'keep':
                         # keep the variant
                         csvWriter.writerow(info.inputRow)
