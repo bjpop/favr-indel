@@ -39,7 +39,6 @@ import os
 import pysam
 import sys
 import csv
-import getopt
 from favr_common_indel import (safeReadInt, getEvidence,
     makeSafeFilename, sortByCoord, parseVariantRowVCF, parseVariantRowAnnovar,
     initEvidence)
