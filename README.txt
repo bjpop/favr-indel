@@ -17,6 +17,21 @@ Web:     https://github.com/bjpop/favr
 
 License: BSD
 
+Citation:
+
+   Please cite FAVR as follows:
+
+   FAVR (Filtering and Annotation of Variants that are Rare): methods to
+   facilitate the analysis of rare germline genetic variants from massively
+   parallel sequencing datasets. 
+   Bernard J Pope, Tú Nguyen-Dumont, Fabrice Odefrey, Fleur Hammet,
+   Russell Bell, Kayoko Tao, Sean V Tavtigian, David E Goldgar, Andrew Lonie,
+   Melissa C Southey and Daniel J Park 
+
+   BMC Bioinformatics 2013, 14:65
+   DOI:10.1186/1471-2105-14-65
+   http://www.biomedcentral.com/1471-2105/14/65/abstract
+
 Requirements: Python 2.6, and the PySam library
 (http://code.google.com/p/pysam/).
 
